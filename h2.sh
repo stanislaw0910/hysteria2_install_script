@@ -30,105 +30,132 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Get external IP
-print_msg "Determining external IP address..."
-EXTERNAL_IP=$(curl -s https://api.ipify.org)
-if [[ -z "$EXTERNAL_IP" ]]; then
-    print_error "Failed to determine external IP address"
-    exit 1
-fi
-print_msg "External IP: $EXTERNAL_IP"
-
-# Function to get domain name via reverse DNS lookup
-get_domain_by_reverse_dns() {
-    local ip=$1
-    local domain=""
-    
-    # Method 1: Using dig (recommended)
-    if command -v dig &> /dev/null; then
-        print_msg "Attempting to get domain via dig..."
-        domain=$(dig -x "$ip" +short | head -1)
-        if [[ -n "$domain" && "$domain" != *".in-addr.arpa."* ]]; then
-            # Remove trailing dot from domain
-            domain="${domain%.}"
-            echo "$domain"
-            return 0
-        fi
+# --- Domain handling ---
+# Domain can be passed as first argument
+if [[ -n "$1" ]]; then
+    DOMAIN_NAME="$1"
+    print_msg "Using domain from command line argument: $DOMAIN_NAME"
+else
+    # Get external IP
+    print_msg "Determining external IP address..."
+    EXTERNAL_IP=$(curl -s https://api.ipify.org)
+    if [[ -z "$EXTERNAL_IP" ]]; then
+        print_error "Failed to determine external IP address"
+        exit 1
     fi
-    
-    # Method 2: Using host
-    if command -v host &> /dev/null; then
-        print_msg "Attempting to get domain via host..."
-        domain=$(host "$ip" | grep "domain name pointer" | head -1 | awk '{print $NF}' | sed 's/\.$//')
-        if [[ -n "$domain" ]]; then
-            echo "$domain"
-            return 0
-        fi
-    fi
-    
-    # Method 3: Using nslookup
-    if command -v nslookup &> /dev/null; then
-        print_msg "Attempting to get domain via nslookup..."
-        domain=$(nslookup "$ip" | grep "name =" | head -1 | awk '{print $NF}' | sed 's/\.$//')
-        if [[ -n "$domain" ]]; then
-            echo "$domain"
-            return 0
-        fi
-    fi
-    
-    # If domain cannot be obtained
-    return 1
-}
+    print_msg "External IP: $EXTERNAL_IP"
 
-# Get domain name
-print_msg "Performing reverse DNS lookup for IP: $EXTERNAL_IP"
-DOMAIN_NAME=$(get_domain_by_reverse_dns "$EXTERNAL_IP")
+    # Function to get domain name via reverse DNS lookup
+    get_domain_by_reverse_dns() {
+        local ip=$1
+        local domain=""
+        
+        if command -v dig &> /dev/null; then
+            print_msg "Attempting to get domain via dig..."
+            domain=$(dig -x "$ip" +short | head -1)
+            if [[ -n "$domain" && "$domain" != *".in-addr.arpa."* ]]; then
+                domain="${domain%.}"
+                echo "$domain"
+                return 0
+            fi
+        fi
+        
+        if command -v host &> /dev/null; then
+            print_msg "Attempting to get domain via host..."
+            domain=$(host "$ip" | grep "domain name pointer" | head -1 | awk '{print $NF}' | sed 's/\.$//')
+            if [[ -n "$domain" ]]; then
+                echo "$domain"
+                return 0
+            fi
+        fi
+        
+        if command -v nslookup &> /dev/null; then
+            print_msg "Attempting to get domain via nslookup..."
+            domain=$(nslookup "$ip" | grep "name =" | head -1 | awk '{print $NF}' | sed 's/\.$//')
+            if [[ -n "$domain" ]]; then
+                echo "$domain"
+                return 0
+            fi
+        fi
+        
+        return 1
+    }
 
-# If reverse DNS gave no result, try other methods
-if [[ -z "$DOMAIN_NAME" ]]; then
-    print_warning "Reverse DNS lookup returned no result for IP $EXTERNAL_IP"
-    
-    # Method 4: Check system hostname
-    print_msg "Checking system hostname..."
-    SYSTEM_HOSTNAME=$(hostname -f 2>/dev/null)
-    if [[ -n "$SYSTEM_HOSTNAME" && "$SYSTEM_HOSTNAME" != "localhost" && "$SYSTEM_HOSTNAME" != *".localdomain" ]]; then
-        DOMAIN_NAME="$SYSTEM_HOSTNAME"
-        print_msg "Using system hostname: $DOMAIN_NAME"
-    else
-        # Method 5: Check environment variables or config files
-        if [[ -f /etc/hostname ]]; then
-            HOSTNAME_FILE=$(cat /etc/hostname | tr -d '\n')
-            if [[ -n "$HOSTNAME_FILE" && "$HOSTNAME_FILE" != "localhost" ]]; then
-                DOMAIN_NAME="$HOSTNAME_FILE"
-                print_msg "Using hostname from /etc/hostname: $DOMAIN_NAME"
+    # Get domain name
+    print_msg "Performing reverse DNS lookup for IP: $EXTERNAL_IP"
+    DOMAIN_NAME=$(get_domain_by_reverse_dns "$EXTERNAL_IP")
+
+    if [[ -z "$DOMAIN_NAME" ]]; then
+        print_warning "Reverse DNS lookup returned no result for IP $EXTERNAL_IP"
+        
+        SYSTEM_HOSTNAME=$(hostname -f 2>/dev/null)
+        if [[ -n "$SYSTEM_HOSTNAME" && "$SYSTEM_HOSTNAME" != "localhost" && "$SYSTEM_HOSTNAME" != *".localdomain" ]]; then
+            DOMAIN_NAME="$SYSTEM_HOSTNAME"
+            print_msg "Using system hostname: $DOMAIN_NAME"
+        else
+            if [[ -f /etc/hostname ]]; then
+                HOSTNAME_FILE=$(cat /etc/hostname | tr -d '\n')
+                if [[ -n "$HOSTNAME_FILE" && "$HOSTNAME_FILE" != "localhost" ]]; then
+                    DOMAIN_NAME="$HOSTNAME_FILE"
+                    print_msg "Using hostname from /etc/hostname: $DOMAIN_NAME"
+                fi
             fi
         fi
     fi
-fi
 
-# If all methods fail, use nip.io
-if [[ -z "$DOMAIN_NAME" ]]; then
-    print_warning "Could not determine domain name automatically"
-    DOMAIN_NAME="${EXTERNAL_IP}.nip.io"
-    print_msg "Will use automatic domain: $DOMAIN_NAME"
-    print_msg "For production, it is recommended to configure a real domain"
-fi
+    if [[ -z "$DOMAIN_NAME" ]]; then
+        print_warning "Could not determine domain name automatically"
+        DOMAIN_NAME="${EXTERNAL_IP}.nip.io"
+        print_msg "Will use automatic domain: $DOMAIN_NAME"
+        print_msg "For production, it is recommended to configure a real domain"
+    fi
 
-print_success "Determined domain name: $DOMAIN_NAME"
+    print_success "Determined domain name: $DOMAIN_NAME"
 
-# User confirmation
-read -p "Use domain '$DOMAIN_NAME'? (y/n, default y): " CONFIRM
-if [[ "$CONFIRM" == "n" || "$CONFIRM" == "N" ]]; then
-    read -p "Enter domain name manually: " MANUAL_DOMAIN
-    if [[ -n "$MANUAL_DOMAIN" ]]; then
-        DOMAIN_NAME="$MANUAL_DOMAIN"
-        print_msg "Using manually entered domain: $DOMAIN_NAME"
-    else
-        print_error "Domain name cannot be empty"
-        exit 1
+    # User confirmation
+    read -p "Use domain '$DOMAIN_NAME'? (y/n, default y): " CONFIRM
+    if [[ "$CONFIRM" == "n" || "$CONFIRM" == "N" ]]; then
+        read -p "Enter domain name manually: " MANUAL_DOMAIN
+        if [[ -n "$MANUAL_DOMAIN" ]]; then
+            DOMAIN_NAME="$MANUAL_DOMAIN"
+            print_msg "Using manually entered domain: $DOMAIN_NAME"
+        else
+            print_error "Domain name cannot be empty"
+            exit 1
+        fi
     fi
 fi
 
+# --- Email handling ---
+# Email can be passed as second argument
+if [[ -n "$2" ]]; then
+    EMAIL="$2"
+    print_msg "Using email from command line argument: $EMAIL"
+else
+    # Interactive email input
+    while true; do
+        read -p "Enter your email address for Let's Encrypt notifications: " EMAIL
+        if [[ -z "$EMAIL" ]]; then
+            print_error "Email cannot be empty. Please try again."
+        elif [[ ! "$EMAIL" =~ @ ]]; then
+            print_error "Invalid email address (must contain '@'). Please try again."
+        else
+            print_msg "Email accepted: $EMAIL"
+            break
+        fi
+    done
+fi
+
+# If EXTERNAL_IP is not set (when domain was passed as argument), get it anyway for info
+if [[ -z "$EXTERNAL_IP" ]]; then
+    EXTERNAL_IP=$(curl -s https://api.ipify.org)
+    if [[ -z "$EXTERNAL_IP" ]]; then
+        print_warning "Could not determine external IP address"
+        EXTERNAL_IP="unknown"
+    fi
+fi
+
+# --- Installation and configuration ---
 # Install qrencode for QR code generation
 print_msg "Installing qrencode for QR code generation..."
 apt-get update -qq
@@ -180,7 +207,7 @@ HTML
 
 print_msg "HTML file successfully created"
 
-# Create configuration file
+# Create configuration file with user-provided email
 print_msg "Creating Hysteria configuration..."
 cat > /etc/hysteria/config.yaml <<EOF
 listen: :8443
@@ -188,7 +215,7 @@ listen: :8443
 acme:
   domains:
     - $DOMAIN_NAME
-  email: 
+  email: $EMAIL
 
 auth:
   type: userpass
@@ -234,25 +261,19 @@ fi
 print_msg "Checking service status..."
 systemctl status hysteria-server.service --no-pager
 
-# Generate connection string in new format with URL encoding
+# Generate connection string
 print_msg "Generating connection string..."
 
-# Connection parameters
 PROTOCOL="hysteria2"
 USERNAME="D"
 PASSWORD="Srvdelta12"
 PORT="8443"
 SERVER="$DOMAIN_NAME"
 
-# URL-encode special characters
-# : = %3A
-# ! = %21
 ENCODED_CREDENTIALS="${USERNAME}%3A${PASSWORD}%21"
 
-# Create connection string in new format with parameters
 CONNECTION_STRING="${PROTOCOL}://${ENCODED_CREDENTIALS}@${SERVER}:${PORT}/?insecure=0&sni=${SERVER}#Hysteria2_${SERVER//./_}"
 
-# Alternative format for clients (more readable)
 CONNECTION_INFO="===========================================
 HYSTERIA2 CONNECTION INFORMATION
 ===========================================
@@ -262,6 +283,7 @@ Protocol: ${PROTOCOL}
 Username: ${USERNAME}
 Password: ${PASSWORD}
 External IP: ${EXTERNAL_IP}
+Email for Let's Encrypt: ${EMAIL}
 
 Connection URI (with escaped characters):
 ${CONNECTION_STRING}
@@ -278,7 +300,6 @@ tls:
 For mobile clients, use the URI string above.
 ==========================================="
 
-# Save connection string to file
 OUTPUT_FILE="/root/hysteria_connection_info.txt"
 echo "$CONNECTION_INFO" > "$OUTPUT_FILE"
 
@@ -292,27 +313,20 @@ else
     print_error "Failed to save connection information file"
 fi
 
-# Additionally save only URI string to a separate file
 URI_FILE="/root/h2_uri.txt"
 echo "$CONNECTION_STRING" > "$URI_FILE"
 print_success "URI string saved to: $URI_FILE"
 
-# Create QR code for easy import
 if command -v qrencode &> /dev/null; then
     print_msg "Creating QR code..."
     QR_FILE="/root/h2.png"
     
-    # Create QR code with improved parameters for better scanning
-    # -s 6: dot size 6 pixels
-    # -l H: high error correction level (30%)
-    # -m 2: margin of 2 modules
     qrencode -o "$QR_FILE" -s 6 -l H -m 2 "$CONNECTION_STRING"
     
     if [[ $? -eq 0 && -f "$QR_FILE" ]]; then
         print_success "QR code saved to: $QR_FILE"
         print_msg "QR code size: $(du -h "$QR_FILE" | cut -f1)"
         
-        # Additionally create QR code in text format for terminal output
         print_msg "QR code in text format:"
         echo "----------------------------------------"
         qrencode -t UTF8 -l H -m 1 "$CONNECTION_STRING" 2>/dev/null || print_warning "Failed to display QR code in terminal"
@@ -322,7 +336,6 @@ if command -v qrencode &> /dev/null; then
     fi
 else
     print_warning "qrencode not installed, QR code will not be created"
-    print_msg "Install qrencode manually: apt install qrencode -y"
 fi
 
 print_msg "========================================="
@@ -333,6 +346,7 @@ print_msg "Domain: $DOMAIN_NAME"
 print_msg "Port: 8443"
 print_msg "Username: $USERNAME"
 print_msg "Password: $PASSWORD"
+print_msg "Email: $EMAIL"
 print_msg ""
 print_msg "Connection URI:"
 print_msg "$CONNECTION_STRING"
